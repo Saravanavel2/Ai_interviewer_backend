@@ -33,18 +33,33 @@ function cleanQuestionText(text) {
   if (!text) return '';
   let clean = text.trim();
   
+  function extractStringValue(obj) {
+    if (!obj) return null;
+    if (typeof obj === 'string') return obj;
+    if (typeof obj === 'object') {
+      if (obj.question && typeof obj.question === 'string') return obj.question;
+      if (obj.question_text && typeof obj.question_text === 'string') return obj.question_text;
+      if (obj.text && typeof obj.text === 'string') return obj.text;
+      if (obj.description && typeof obj.description === 'string') return obj.description;
+      
+      const vals = Object.values(obj);
+      for (const val of vals) {
+        const found = extractStringValue(val);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
   if (clean.startsWith('{') && clean.endsWith('}')) {
     try {
       const parsed = JSON.parse(clean);
       if (parsed && (parsed.title || parsed.description || parsed.templates)) {
         return text; // Preserve coding question JSON format as-is
       }
-      if (typeof parsed === 'object') {
-        const vals = Object.values(parsed);
-        const firstStr = vals.find(v => typeof v === 'string' && v.trim().length > 0);
-        if (firstStr) {
-          clean = firstStr.trim();
-        }
+      const extracted = extractStringValue(parsed);
+      if (extracted) {
+        clean = extracted.trim();
       }
     } catch (e) {
       const match = clean.match(/^\{\s*["']?[a-zA-Z0-9_-]+["']?\s*:\s*["']([\s\S]*?)["']\s*\}$/);
