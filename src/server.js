@@ -259,67 +259,92 @@ app.get('/api/resume/:resumeId/ats-score', authenticateToken, async (req, res) =
       return res.status(404).json({ error: 'Resume not found.' });
     }
 
-    // Check if score is already cached in database
+    // Cache is role+company specific — if role/company changed, always reanalyze
     if (resume.ats_score !== null && resume.ats_feedback) {
       try {
         const cachedFeedback = JSON.parse(resume.ats_feedback);
-        return res.json({
-          ats_score: resume.ats_score,
-          matching_keywords: cachedFeedback.matching_keywords || [],
-          missing_keywords: cachedFeedback.missing_keywords || [],
-          feedback: cachedFeedback.feedback || []
-        });
+        // Only use cache if it was computed for the same role+company
+        if (
+          cachedFeedback.cached_role === target_role &&
+          cachedFeedback.cached_company === target_company
+        ) {
+          return res.json({
+            ats_score: resume.ats_score,
+            matching_keywords: cachedFeedback.matching_keywords || [],
+            missing_keywords: cachedFeedback.missing_keywords || [],
+            feedback: cachedFeedback.feedback || []
+          });
+        }
       } catch (e) {
         // Fall through to regenerate if parsing fails
       }
     }
 
     console.log(`Calculating ATS score for role: ${target_role} at ${target_company}`);
-    const prompt = `You are a professional Applicant Tracking System (ATS) optimized for tech recruitment.
-Analyze the candidate's resume below in the context of their target company: "${target_company}" and target role: "${target_role}".
 
-Resume text:
+    // Count words and unique technical terms in resume for context
+    const resumeWordCount = resume.raw_text ? resume.raw_text.split(/\s+/).length : 0;
+
+    const prompt = `You are a senior ATS (Applicant Tracking System) engine used by top-tier tech recruiters.
+
+Your task: analyze the SPECIFIC resume text below and score it for the SPECIFIC role and company given.
+Do NOT return generic or template scores. Base EVERY value strictly on the actual resume content.
+
+=== TARGET ROLE: ${target_role} ===
+=== TARGET COMPANY: ${target_company} ===
+=== RESUME WORD COUNT: ~${resumeWordCount} words ===
+
+=== FULL RESUME TEXT ===
 ${resume.raw_text}
+=== END RESUME ===
 
-Provide:
-1. An overall ATS score (integer between 0 and 100) reflecting their matching probability.
-2. A list of 5-8 matching keywords/skills that align with the role.
-3. A list of 5-8 critical missing keywords/skills standard recruiters or ATS systems at "${target_company}" look for.
-4. An array of 3-4 bullet points of constructive resume revision tips.
+Instructions:
+1. Read the entire resume carefully and extract actual skills, tools, technologies, and keywords present.
+2. Compare those against what a real recruiter at "${target_company}" typically screens for in a "${target_role}" candidate.
+3. Compute an ATS match score from 0–100 reflecting the actual alignment:
+   - Consider keyword density, section structure, quantification, relevant experience, and tool coverage.
+   - Do NOT default to 70–75. If the resume is weak, score it below 60. If strong, score above 80.
+4. List 5-8 ACTUAL matching keywords/skills you found verbatim in the resume text above.
+5. List 5-8 keywords/skills that are MISSING from this resume but are standard requirements for "${target_role}" at "${target_company}".
+6. Provide 3-4 specific, actionable improvement tips referencing actual content from this resume.
 
-Return ONLY strict JSON format:
+Return ONLY this strict JSON:
 {
-  "ats_score": 75,
-  "matching_keywords": ["React", "JavaScript", "HTML5"],
-  "missing_keywords": ["Webpack", "Unit Testing", "Observability"],
+  "ats_score": <integer 0-100>,
+  "matching_keywords": ["keyword1", "keyword2", ...],
+  "missing_keywords": ["keyword1", "keyword2", ...],
   "feedback": [
-    "Quantify your accomplishments (e.g. latency, concurrent users, percent load reduction) across your Projects and Experience sections.",
-    "Add cloud and infrastructure keywords such as AWS, Docker, or Kubernetes to match target recruiters' automated keyword screens.",
-    "Reorganize your Technical Skills section into clean subsets like Languages, Frameworks, and Tools for better ATS scanning."
+    "Specific tip referencing actual resume content...",
+    "Another specific tip..."
   ]
 }`;
 
-    const aiResponse = await callGemini(prompt, api_key || "", true);
+    const aiResponse = await callGemini(prompt, api_key || '', true);
     const parsedData = parseJsonSafely(aiResponse);
 
-    const score = parsedData.ats_score || 70;
-    const feedbackJson = JSON.stringify({
+    const score = typeof parsedData.ats_score === 'number'
+      ? Math.min(100, Math.max(0, parsedData.ats_score))
+      : 65;
+
+    const feedbackPayload = {
+      cached_role: target_role,
+      cached_company: target_company,
       matching_keywords: parsedData.matching_keywords || [],
       missing_keywords: parsedData.missing_keywords || [],
       feedback: parsedData.feedback || []
-    });
+    };
 
-    // Save/cache in db
+    // Cache in DB with role+company metadata so future requests with different role reanalyze
     await db.run(
       'UPDATE resumes SET ats_score = ?, ats_feedback = ? WHERE id = ?',
-      [score, feedbackJson, resumeId]
+      [score, JSON.stringify(feedbackPayload), resumeId]
     );
 
     res.json({
       ats_score: score,
-      matching_keywords: parsedData.matching_keywords || [],
-      missing_keywords: parsedData.missing_keywords || [],
-      feedback: parsedData.feedback || []
+      matching_keywords: feedbackPayload.matching_keywords,
+      missing_keywords: feedbackPayload.missing_keywords,
+      feedback: feedbackPayload.feedback
     });
 
   } catch (error) {
@@ -662,34 +687,90 @@ All scoring fields must be numbers between 0 and 100, overall should be a weight
         parsedQuestionText = `${parsed.title}\n\nDescription:\n${parsed.description}`;
       } catch (e) {}
 
+      // Check if the code is truly empty or just the template placeholder
+      const isEmptyCode = (code) => {
+        const stripped = code.trim();
+        if (!stripped) return true;
+        // Remove all comments, whitespace-only lines, and common placeholder patterns
+        const noComments = stripped
+          .replace(/\/\/.*$/gm, '')     // JS single-line comments
+          .replace(/\/\*[\s\S]*?\*\//g, '') // JS block comments
+          .replace(/#.*$/gm, '')         // Python comments
+          .replace(/\/\/.*$/gm, '')      // Java comments
+          .trim();
+        if (!noComments) return true;
+        // Only whitespace or empty lines remain
+        const lines = noComments.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        if (lines.length === 0) return true;
+        // Common template starters with no real logic added
+        const templatePatterns = [
+          /^\s*\/\/\s*write your solution/i,
+          /^\s*\/\/\s*your code here/i,
+          /^\s*\/\/\s*solution/i,
+          /^\s*pass\s*$/i,           // Python empty function
+          /^\s*return\s+null\s*;?\s*$/i,
+          /^\s*return\s+none\s*;?\s*$/i,
+          /^\s*return\s+0\s*;?\s*$/i,
+          /^\s*\{\s*\}\s*$/,         // Empty braces only
+          /^\s*function\s+\w+\s*\(.*\)\s*\{\s*\}\s*$/i, // Empty function
+        ];
+        if (lines.length <= 2 && templatePatterns.some(p => p.test(stripped))) return true;
+        // Very short code that adds nothing meaningful (< 10 real chars after stripping)
+        const realChars = noComments.replace(/[\s{}();,]/g, '');
+        if (realChars.length < 10) return true;
+        return false;
+      };
+
       let codingEval;
-      if (isGibberish(answer_text)) {
+      if (isGibberish(answer_text) || isEmptyCode(answer_text)) {
         codingEval = {
           correctness_score: 0,
-          feedback: "The submitted code was blank or unrecognizable. Please implement a valid solution."
+          feedback: "No solution was submitted. The code editor was empty or contained only the template placeholder without any actual implementation. A score of 0 is assigned. Please write a complete solution to receive a score."
         };
       } else {
-        const promptCoding = `You are a senior technical interviewer at ${target_company} evaluating a coding round submission for the role of ${target_role}.
-Question Details:
+        const codeLineCount = answer_text.trim().split('\n').length;
+        const promptCoding = `You are a senior technical interviewer at ${target_company} evaluating a LIVE coding round submission for the role of ${target_role}.
+
+Problem Statement:
 ${parsedQuestionText}
 
-Selected Language: ${coding_language || 'Code'}
-Candidate's Solution Code:
+Language: ${coding_language || 'Code'}
+Lines of Code Written: ${codeLineCount}
+Compilation/Run Status: ${compilation_status || 'Not compiled'}
+
+Candidate's Submitted Code:
+\`\`\`${coding_language || ''}
 ${answer_text}
+\`\`\`
 
-Compilation Status: ${compilation_status || 'Successfully Run'}
+Evaluation Instructions (STRICT — do NOT default to a high score):
+1. Read the ENTIRE code carefully before scoring.
+2. Determine if the code actually SOLVES the problem above — not just whether it compiles.
+3. Score correctness from 0 to 100 based ONLY on what is written:
+   - 0: Empty, template only, or completely unrelated code
+   - 1-20: Code exists but is fundamentally broken, wrong algorithm, or doesn't address the problem
+   - 21-40: Partial attempt — correct idea but major logic errors or missing core cases
+   - 41-60: Moderate solution — solves basic cases but misses edge cases or has inefficiencies
+   - 61-80: Good solution — mostly correct with minor issues in edge cases or complexity
+   - 81-100: Excellent solution — correct, efficient, handles edge cases, clean code
+4. If compilation_status shows an error and the code is clearly broken, that should significantly lower the score.
+5. If the code is just a comment like '// TODO' or a single return statement, score it 0-5.
+6. Do NOT give a high score if the code is minimal or does not implement the actual algorithm.
 
-Evaluate the candidate's code correctness, algorithm design, syntax correctness, efficiency (time/space complexity), and code style.
-Provide a correctness score (0 to 100) and detailed constructive feedback.
-
-Return strict JSON format:
+Return ONLY this strict JSON:
 {
-  "correctness_score": 85,
-  "feedback": "detailed analytical review..."
+  "correctness_score": <integer 0-100, based strictly on the code above>,
+  "feedback": "<specific analysis of what the code does or doesn't do correctly, referencing actual code lines>"
 }`;
 
-        const codingEvalResponse = await callGemini(promptCoding, api_key || "", true);
+        const codingEvalResponse = await callGemini(promptCoding, api_key || '', true);
         codingEval = parseJsonSafely(codingEvalResponse);
+
+        // Validate score is a real number, not AI hallucination
+        if (typeof codingEval.correctness_score !== 'number') {
+          codingEval.correctness_score = 0;
+        }
+        codingEval.correctness_score = Math.min(100, Math.max(0, Math.round(codingEval.correctness_score)));
       }
 
       await db.run(
@@ -938,53 +1019,95 @@ app.post('/api/session/:sessionId/generate-coding-question', authenticateToken, 
 
     console.log(`Generating coding round question for role: ${target_role} at ${target_company}`);
 
-    const prompt = `You are a senior technical interviewer at ${target_company} hiring for the role of ${target_role}.
-Generate exactly one coding interview question suitable for a live coding assessment.
-The question should test algorithms, data structures, or problem-solving, matched to standard SDE/engineering interview bars at ${target_company} for a ${target_role}.
+    const prompt = `You are a senior technical interviewer at ${target_company} for the ${target_role} role.
+Generate a coding interview question for a live assessment.
+Return ONLY a JSON object with these exact fields: title, description, difficulty, topic, templates.
+- title: short problem name (string)
+- description: full problem statement with examples and constraints (string, use newlines with \\n)
+- difficulty: one of Easy, Medium, Hard
+- topic: the algorithm/data structure topic
+- templates: object with python, java, and javascript starter code strings
+Make it relevant to ${target_role} interviews. Do not include anything outside the JSON object.`;
 
-Return strict JSON format:
-{
-  "title": "Problem Title",
-  "description": "Problem description, input/output formats, examples, and edge case constraints...",
-  "difficulty": "Easy/Medium/Hard",
-  "topic": "Algorithms/Data Structures/etc.",
-  "templates": {
-    "python": "def solve(arr):\n    # Write your solution here\n    pass",
-    "java": "class Solution {\n    public static void solve(int[] arr) {\n        // Write your solution here\n    }\n}",
-    "javascript": "function solve(arr) {\n    // Write your solution here\n}"
-  }
-}`;
+    const aiResponse = await callGemini(prompt, api_key || '', true);
+    console.log('Raw coding question AI response:', aiResponse ? aiResponse.substring(0, 300) : 'null');
 
-    const aiResponse = await callGemini(prompt, api_key || "", true);
-    const parsedData = parseJsonSafely(aiResponse);
+    let parsedData = {};
+    try {
+      parsedData = parseJsonSafely(aiResponse);
+    } catch (parseErr) {
+      console.error('Failed to parse coding question JSON:', parseErr.message);
+    }
 
-    // Save coding question in database (is_technical = 2 represents coding round)
+    const title = (typeof parsedData.title === 'string' && parsedData.title.trim()) ? parsedData.title.trim() : null;
+    const description = (typeof parsedData.description === 'string' && parsedData.description.trim()) ? parsedData.description.trim() : null;
+    const difficulty = (typeof parsedData.difficulty === 'string' && parsedData.difficulty.trim()) ? parsedData.difficulty.trim() : 'Medium';
+    const topic = (typeof parsedData.topic === 'string' && parsedData.topic.trim()) ? parsedData.topic.trim() : 'Algorithms';
+
+    const getFallback = () => {
+      const lower = target_role.toLowerCase();
+      if (lower.includes('frontend') || lower.includes('react') || lower.includes('web')) {
+        return {
+          title: 'Flatten Nested Array',
+          description: 'Write a function that flattens a deeply nested array into a single-level array.\n\nExample:\nInput: [1, [2, [3, [4]], 5]]\nOutput: [1, 2, 3, 4, 5]\n\nConstraints:\n- The input may be nested to any depth\n- Do not use Array.prototype.flat()',
+          topic: 'Arrays & Recursion',
+          difficulty: 'Medium'
+        };
+      }
+      if (lower.includes('backend') || lower.includes('node') || lower.includes('java') || lower.includes('python')) {
+        return {
+          title: 'LRU Cache',
+          description: 'Design and implement an LRU (Least Recently Used) cache.\n\nImplement the LRUCache class:\n- LRUCache(int capacity): Initialize the LRU cache with capacity.\n- int get(int key): Return the value if key exists, otherwise return -1.\n- void put(int key, int value): Update or insert. Evict the least recently used key if capacity is exceeded.\n\nBoth operations must run in O(1) time complexity.',
+          topic: 'Data Structures & Design',
+          difficulty: 'Medium'
+        };
+      }
+      return {
+        title: 'Valid Parentheses',
+        description: 'Given a string s containing just the characters \'(\', \')\', \'{\', \'}\', \'[\' and \']\', determine if the input string is valid.\n\nA string is valid if:\n- Open brackets are closed by the same type of brackets.\n- Open brackets are closed in the correct order.\n- Every close bracket has a corresponding open bracket.\n\nExample:\nInput: s = "()[]{}" → Output: true\nInput: s = "(]" → Output: false',
+        topic: 'Stack & Strings',
+        difficulty: 'Easy'
+      };
+    };
+
+    const fallback = getFallback();
+    const finalTitle = title || fallback.title;
+    const finalDescription = description || fallback.description;
+    const finalDifficulty = difficulty || fallback.difficulty;
+    const finalTopic = topic || fallback.topic;
+
+    const templates = (parsedData.templates && typeof parsedData.templates === 'object')
+      ? parsedData.templates
+      : {
+          python: `# ${finalTitle}\ndef solution():\n    # Write your solution here\n    pass`,
+          java: `// ${finalTitle}\nclass Solution {\n    public static void main(String[] args) {\n        // Write your solution here\n    }\n}`,
+          javascript: `// ${finalTitle}\nfunction solution() {\n    // Write your solution here\n}`
+        };
+
     const questionId = uuid();
     const questionData = {
-      title: parsedData.title || 'Coding Challenge',
-      description: parsedData.description || 'Write a solution for this coding question.',
-      templates: parsedData.templates || {
-        python: '# Write code here',
-        java: '// Write code here',
-        javascript: '// Write code here'
-      }
+      title: finalTitle,
+      description: finalDescription,
+      templates
     };
 
     await db.run(
       'INSERT INTO questions (id, session_id, question_text, topic, difficulty, is_technical) VALUES (?, ?, ?, ?, ?, ?)',
-      [questionId, sessionId, JSON.stringify(questionData), parsedData.topic || 'Algorithms', parsedData.difficulty || 'Medium', 2]
+      [questionId, sessionId, JSON.stringify(questionData), finalTopic, finalDifficulty, 2]
     );
+
+    console.log(`Coding question saved: "${finalTitle}" (${finalDifficulty}) — Topic: ${finalTopic}`);
 
     res.json({
       id: questionId,
-      title: questionData.title,
-      description: questionData.description,
-      templates: questionData.templates,
-      topic: parsedData.topic || 'Algorithms',
-      difficulty: parsedData.difficulty || 'Medium'
+      title: finalTitle,
+      description: finalDescription,
+      templates,
+      topic: finalTopic,
+      difficulty: finalDifficulty
     });
   } catch (error) {
-    console.error('Error generating coding question:', error);
+    console.error('Error generating coding question:', error.message);
     res.status(500).json({ error: 'Failed to generate coding question.' });
   }
 });

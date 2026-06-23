@@ -664,15 +664,49 @@ function generateDynamicSimulation(prompt) {
     });
   }
   if (promptLower.includes("ats score") || promptLower.includes("applicant tracking system")) {
+    // Return a signal that AI was unavailable - server will handle the error
+    return JSON.stringify({ "error": "AI service unavailable for ATS analysis" });
+  }
+
+  // Fallback for coding question generation
+  if (promptLower.includes("coding interview question") || promptLower.includes("live coding assessment") || promptLower.includes("live assessment")) {
+    if (promptLower.includes('frontend') || promptLower.includes('react') || promptLower.includes('web')) {
+      return JSON.stringify({
+        "title": "Flatten Nested Array",
+        "description": "Write a function that flattens a deeply nested array into a single-level array.\n\nExample:\nInput: [1, [2, [3, [4]], 5]]\nOutput: [1, 2, 3, 4, 5]\n\nConstraints:\n- The input may be nested to any depth\n- Do not use Array.prototype.flat()",
+        "difficulty": "Medium",
+        "topic": "Arrays & Recursion",
+        "templates": {
+          "python": "def flatten(arr):\n    # Write your solution here\n    pass",
+          "java": "import java.util.*;\nclass Solution {\n    public List<Integer> flatten(Object[] arr) {\n        // Write your solution here\n        return new ArrayList<>();\n    }\n}",
+          "javascript": "function flatten(arr) {\n    // Write your solution here\n}"
+        }
+      });
+    }
+    if (promptLower.includes('backend') || promptLower.includes('java') || promptLower.includes('python') || promptLower.includes('node')) {
+      return JSON.stringify({
+        "title": "LRU Cache",
+        "description": "Design and implement a Least Recently Used (LRU) cache.\n\nImplement the LRUCache class:\n- LRUCache(int capacity): Initialize with positive capacity.\n- int get(int key): Return the value if key exists, else -1.\n- void put(int key, int value): Update or insert. Evict LRU key if over capacity.\n\nBoth get and put must run in O(1) time complexity.",
+        "difficulty": "Medium",
+        "topic": "Data Structures & Design",
+        "templates": {
+          "python": "class LRUCache:\n    def __init__(self, capacity: int):\n        # Write your solution here\n        pass\n\n    def get(self, key: int) -> int:\n        return -1\n\n    def put(self, key: int, value: int) -> None:\n        pass",
+          "java": "import java.util.*;\nclass LRUCache {\n    public LRUCache(int capacity) {\n        // Write your solution here\n    }\n    public int get(int key) { return -1; }\n    public void put(int key, int value) {}\n}",
+          "javascript": "class LRUCache {\n    constructor(capacity) {\n        // Write your solution here\n    }\n    get(key) { return -1; }\n    put(key, value) {}\n}"
+        }
+      });
+    }
+    // Generic fallback for all other roles (fullstack, data, etc)
     return JSON.stringify({
-      "ats_score": 75,
-      "matching_keywords": ["JavaScript", "React.js", "Python", "SQL", "Git", "REST APIs", "TypeScript"],
-      "missing_keywords": ["Docker", "AWS (EC2/RDS)", "CI/CD Pipelines", "System Design", "Observability (Grafana)", "Unit Testing (Jest)"],
-      "feedback": [
-        `Align your resume bullet points for the ${role} position at ${company} by explicitly adding scale metrics (e.g. latency percentiles, requests per second).`,
-        `Include infrastructure keywords such as Docker and AWS which are standard requirements for ${company}'s hiring standard.`,
-        "Reorganize your Technical Skills section into categories like Languages, Frameworks, and Cloud Tools for better machine parsing layout."
-      ]
+      "title": "Valid Parentheses",
+      "description": "Given a string s containing just '(', ')', '{', '}', '[' and ']', determine if the input string is valid.\n\nA string is valid if:\n1. Open brackets are closed by the same type of brackets.\n2. Open brackets are closed in the correct order.\n3. Every close bracket has a corresponding open bracket of the same type.\n\nExample:\nInput: s = \"()[]{}\" → Output: true\nInput: s = \"(]\" → Output: false\nInput: s = \"([)]\" → Output: false",
+      "difficulty": "Easy",
+      "topic": "Stack & Strings",
+      "templates": {
+        "python": "def isValid(s: str) -> bool:\n    # Write your solution here\n    pass",
+        "java": "class Solution {\n    public boolean isValid(String s) {\n        // Write your solution here\n        return false;\n    }\n}",
+        "javascript": "function isValid(s) {\n    // Write your solution here\n}"
+      }
     });
   }
 
